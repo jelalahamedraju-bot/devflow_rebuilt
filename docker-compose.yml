@@ -1,0 +1,22 @@
+# 复现项目自己的数据库，和 Langfuse 的 postgres（占用 5432）分开
+services:
+  postgres:
+    image: pgvector/pgvector:pg16      # 与原项目一致，后面章节也能用 pgvector
+    container_name: devflow-rebuild-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: devflow
+      POSTGRES_PASSWORD: devflow
+      POSTGRES_DB: devflow
+    ports:
+      - "127.0.0.1:5433:5432"          # 本机 5433 -> 容器 5432
+    volumes:
+      - devflow_rebuild_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U devflow -d devflow"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  devflow_rebuild_pg:

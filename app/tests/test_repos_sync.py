@@ -1,8 +1,10 @@
 """6.4 Issue 同步链路的测试。
 
 不联网：用 monkeypatch 把「去 GitHub 拉 Issue」换成返回固定数据的假函数；
-数据库用内存 SQLite，测完即消失。
+数据库默认用内存 SQLite，也可以通过 TEST_DATABASE_URL 切到 PostgreSQL。
 """
+
+import os
 
 import pytest
 from sqlalchemy import create_engine
@@ -14,14 +16,32 @@ from app.schemas.repos import RepoSyncRequest
 from app.services.repos_sync import sync_repository
 
 
-def make_db():
-    engine = create_engine(
-        "sqlite+pysqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
+@pytest.fixture
+def db():
+    """每个测试拿到一个干净的数据库会话，测完一定关闭。
+
+    默认用内存 SQLite（快、不依赖外部服务）。
+    设置环境变量 TEST_DATABASE_URL 后改用真实 PostgreSQL，例如：
+    TEST_DATABASE_URL=postgresql+psycopg://devflow:devflow@127.0.0.1:5433/devflow_test
+    SQLite 对类型很宽松（整数永远是 64 位），有些 bug 只有在 PostgreSQL 上才会暴露。
+    """
+    url = os.environ.get("TEST_DATABASE_URL")
+    if url:
+        engine = create_engine(url)
+        Base.metadata.drop_all(engine)  # 每个测试从空库开始
+    else:
+        engine = create_engine(
+            "sqlite+pysqlite:///:memory:",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
     Base.metadata.create_all(engine)
-    return sessionmaker(bind=engine)()
+    session = sessionmaker(bind=engine)()
+    yield session
+    # 收尾：不关闭的话，PostgreSQL 上会留下「idle in transaction」的连接，
+    # 它持有表锁，下一个测试的 DROP TABLE 会一直等下去（卡死）。
+    session.close()
+    engine.dispose()
 
 
 def make_repo(db, owner="openai", name="openai-quickstart-python"):
@@ -31,8 +51,11 @@ def make_repo(db, owner="openai", name="openai-quickstart-python"):
     return repo
 
 
-def github_issue(gid=7800, number=78, state="open", title="Error: Could not import 'app'."):
-    """模拟 GitHub API 返回的一条 Issue JSON（只保留用得到的字段）。"""
+def github_issue(gid=6078323038, number=78, state="open", title="Error: Could not import 'app'."):
+    """模拟 GitHub API 返回的一条 Issue JSON（只保留用得到的字段）。
+
+    gid 用真实量级：GitHub 的 ID 早已超过 32 位整数上限（约 21 亿）。
+    """
     return {
         "id": gid,
         "number": number,
@@ -58,8 +81,7 @@ def fake_github(monkeypatch, items_by_repo):
 
 
 # 1. 基本功能：GitHub 的 Issue 能存进数据库，字段转换正确
-async def test_sync_saves_issue_to_database(monkeypatch):
-    db = make_db()
+async def test_sync_saves_issue_to_database(db, monkeypatch):
     repo = make_repo(db)
     fake_github(monkeypatch, {repo.full_name: [github_issue()]})
 
@@ -69,7 +91,7 @@ async def test_sync_saves_issue_to_database(monkeypatch):
     assert result.status == "completed"
     assert result.synced == {"issues": 1}
     assert issue.number == 78
-    assert issue.github_issue_id == 7800
+    assert issue.github_issue_id == 6078323038
     assert issue.labels == ["bug"]
     assert issue.author == "contributor"
     assert issue.assignees == ["alice"]
@@ -78,8 +100,7 @@ async def test_sync_saves_issue_to_database(monkeypatch):
 
 
 # 2. 幂等：同一个 Issue 第二次同步时从 open 变 closed，应更新原行而不是新增一行
-async def test_resync_updates_existing_row(monkeypatch):
-    db = make_db()
+async def test_resync_updates_existing_row(db, monkeypatch):
     repo = make_repo(db)
 
     fake_github(monkeypatch, {repo.full_name: [github_issue(state="open")]})
@@ -93,8 +114,7 @@ async def test_resync_updates_existing_row(monkeypatch):
 
 
 # 3. 仓库隔离：两个仓库都有 #42，各存各的，互不覆盖
-async def test_two_repos_with_same_issue_number_do_not_mix(monkeypatch):
-    db = make_db()
+async def test_two_repos_with_same_issue_number_do_not_mix(db, monkeypatch):
     repo_a = make_repo(db, "team", "repo-a")
     repo_b = make_repo(db, "team", "repo-b")
     fake_github(

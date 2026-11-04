@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import JSON, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, Uuid
+from sqlalchemy import JSON, BigInteger, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, Uuid
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.session import Base
@@ -34,7 +34,8 @@ class Issue(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     repo_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("repositories.id"), index=True)
-    github_issue_id: Mapped[int] = mapped_column(Integer)
+    # GitHub ID 已超过 32 位整数上限（约 21 亿），必须用 BigInteger（64 位）
+    github_issue_id: Mapped[int] = mapped_column(BigInteger)
     number: Mapped[int] = mapped_column(Integer)
     title: Mapped[str] = mapped_column(String(500))
     body: Mapped[str | None] = mapped_column(Text, nullable=True)

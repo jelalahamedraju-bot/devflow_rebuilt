@@ -7,7 +7,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     # 先用 SQLite 文件；以后换 PostgreSQL 只需改 .env：
-    # DATABASE_URL=postgresql+psycopg://devflow:devflow@localhost:5432/devflow
+    # DATABASE_URL=postgresql+psycopg://devflow:devflow@127.0.0.1:5433/devflow
     database_url: str = "sqlite:///./devflow.db"
 
     # 公开仓库低频测试可以不配；私有仓库或想要更高额度时在 .env 里设置 GITHUB_TOKEN
