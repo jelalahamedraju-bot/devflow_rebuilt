@@ -4,6 +4,8 @@
 - Run 本体：按 repo_id + GitHub run ID 有则更新、无则新增
 - jobs：每个 Job 和它的 Steps，整理成 JSON 存在 Run 上
 - 日志：只有 conclusion == "failure" 的运行才下载（成功日志量大、价值低）
+  · 优先只下载「失败的那个 Job」的日志（被连带取消的 Job 不要）
+  · 找不到失败的 Job（比如还没开始就挂了），才退回下载整次运行的日志
 - 日志下载失败不能拖垮整次同步（GitHub 下载日志需要 Token，没配就会 403）
 """
 
@@ -25,9 +27,9 @@ def github_run(gid=19000000001, name="CI", status="completed", conclusion="succe
     }
 
 
-def github_job(name="test", conclusion="failure"):
+def github_job(name="test", conclusion="failure", gid=5500000001):
     return {
-        "id": 5500000001,
+        "id": gid,
         "name": name,
         "status": "completed",
         "conclusion": conclusion,
@@ -42,10 +44,20 @@ def github_job(name="test", conclusion="failure"):
     }
 
 
-def fake_ci(monkeypatch, runs, jobs_by_run=None, logs_by_run=None):
+def fake_ci(monkeypatch, runs, jobs_by_run=None, logs_by_run=None, logs_by_job=None):
+    """把 CI 相关的 GitHub 接口换成假的；返回记录「下载了哪些日志」的列表。
+
+    记录格式：("run", run_id) 表示下载整次运行的日志包；("job", job_id) 表示只下载某个 Job 的日志。
+    """
     jobs_by_run = jobs_by_run or {}
     logs_by_run = logs_by_run or {}
+    logs_by_job = logs_by_job or {}
     log_calls = []
+
+    def answer(result):
+        if isinstance(result, Exception):
+            raise result
+        return result
 
     async def fake_runs(owner, repo, **_kwargs):
         return runs
@@ -53,16 +65,18 @@ def fake_ci(monkeypatch, runs, jobs_by_run=None, logs_by_run=None):
     async def fake_jobs(owner, repo, run_id, **_kwargs):
         return jobs_by_run.get(run_id, [])
 
-    async def fake_logs(owner, repo, run_id, **_kwargs):
-        log_calls.append(run_id)
-        result = logs_by_run.get(run_id, "")
-        if isinstance(result, Exception):
-            raise result
-        return result
+    async def fake_run_logs(owner, repo, run_id, **_kwargs):
+        log_calls.append(("run", run_id))
+        return answer(logs_by_run.get(run_id, ""))
+
+    async def fake_job_logs(owner, repo, job_id, **_kwargs):
+        log_calls.append(("job", job_id))
+        return answer(logs_by_job.get(job_id, ""))
 
     monkeypatch.setattr("app.services.repos_sync.list_workflow_runs", fake_runs)
     monkeypatch.setattr("app.services.repos_sync.list_workflow_run_jobs", fake_jobs)
-    monkeypatch.setattr("app.services.repos_sync.get_workflow_run_logs", fake_logs)
+    monkeypatch.setattr("app.services.repos_sync.get_workflow_run_logs", fake_run_logs)
+    monkeypatch.setattr("app.services.repos_sync.get_job_logs", fake_job_logs, raising=False)
     return log_calls
 
 
@@ -74,14 +88,14 @@ async def test_sync_saves_runs_and_fetches_logs_only_for_failures(db, monkeypatc
     log_calls = fake_ci(
         monkeypatch,
         runs=[ok, bad],
-        jobs_by_run={2: [github_job("pytest", "failure")]},
-        logs_by_run={2: "FAILED tests/test_app.py::test_import - ModuleNotFoundError"},
+        jobs_by_run={2: [github_job("pytest", "failure", gid=900)]},
+        logs_by_job={900: "FAILED tests/test_app.py::test_import - ModuleNotFoundError"},
     )
 
     result = await sync_repository(db, repo, RepoSyncRequest())
 
     assert result.synced["workflow_runs"] == 2
-    assert log_calls == [2]  # 成功的 run 1 没有去下载日志
+    assert log_calls == [("job", 900)]  # 成功的 run 1 没有去下载日志
 
     failed = db.query(WorkflowRun).filter(WorkflowRun.repo_id == repo.id, WorkflowRun.github_run_id == 2).one()
     assert failed.conclusion == "failure"
@@ -140,3 +154,33 @@ async def test_ci_switch_off(db, monkeypatch):
 
     assert "workflow_runs" not in result.synced
     assert db.query(WorkflowRun).count() == 0
+
+
+# 12. 4 个 Python 版本一起跑，只有 3.12 失败、其余被连带取消：
+#     只下载 3.12 那个 Job 的日志（真实案例：encode/httpx，之前存下的是被取消的 3.10 的日志）
+async def test_only_failed_job_logs_are_downloaded(db, monkeypatch):
+    repo = make_repo(db)
+    log_calls = fake_ci(
+        monkeypatch,
+        runs=[github_run(gid=20, conclusion="failure")],
+        jobs_by_run={
+            20: [
+                github_job("Python 3.10", "cancelled", gid=310),
+                github_job("Python 3.11", "cancelled", gid=311),
+                github_job("Python 3.12", "failure", gid=312),
+                github_job("Python 3.13", "cancelled", gid=313),
+            ]
+        },
+        logs_by_job={
+            310: "##[error]The operation was canceled.",
+            312: "E   AssertionError: expected 200, got 500\n##[error]Process completed with exit code 1.",
+        },
+    )
+
+    await sync_repository(db, repo, RepoSyncRequest())
+
+    assert log_calls == [("job", 312)]
+    run = db.query(WorkflowRun).filter(WorkflowRun.github_run_id == 20).one()
+    assert "Python 3.12" in run.logs_text  # 标明是哪个 Job 的日志
+    assert "AssertionError: expected 200, got 500" in run.logs_text
+    assert "operation was canceled" not in run.logs_text

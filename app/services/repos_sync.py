@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from app.db.models import Issue, PRFile, PRReviewComment, PullRequest, Repository, WorkflowRun
 from app.schemas.repos import RepoSyncRequest, RepoSyncResponse
-from app.services.github.actions import get_workflow_run_logs, list_workflow_run_jobs, list_workflow_runs
+from app.services.github.actions import get_job_logs, get_workflow_run_logs, list_workflow_run_jobs, list_workflow_runs
 from app.services.github.issues import list_issues
 from app.services.github.pull_requests import (
     list_pull_request_files,
@@ -192,9 +192,31 @@ async def _sync_workflow_runs(db: Session, repo: Repository, limit: int) -> int:
         # ③ 只有失败的运行才下载日志：成功日志量大、重复多，排查价值低
         if run.conclusion == "failure":
             try:
-                run.logs_text = await get_workflow_run_logs(repo.owner, repo.name, item["id"])
+                run.logs_text = await _download_failure_logs(repo, item["id"], jobs)
             except Exception:
                 # 日志是「锦上添花」：下载失败（没 Token、日志已过期被删）不能拖垮整次同步。
                 # 运行记录本身照样保存，只是没有日志。（和「同步不依赖 RAG」是同一个原则）
                 pass
     return len(items)
+
+
+LOG_BUDGET = 80_000  # 每次失败运行最多保存多少字符的日志
+
+
+async def _download_failure_logs(repo: Repository, run_id: int, jobs: list[dict]) -> str:
+    """优先只下载「真正失败」的 Job 的日志。
+
+    真实案例（encode/httpx）：4 个 Python 版本并行测试，只有 3.12 失败，另外 3 个被连带取消。
+    如果下载整个日志包再从头截取，存下来的是被取消的 3.10 的日志，真正的报错反而被截掉了。
+    """
+    failed_jobs = [job for job in jobs if job.get("conclusion") == "failure"]
+    if not failed_jobs:
+        # 找不到失败的 Job（例如还没开始就挂了），退回下载整次运行的日志包
+        return await get_workflow_run_logs(repo.owner, repo.name, run_id, max_chars=LOG_BUDGET)
+
+    per_job = LOG_BUDGET // len(failed_jobs)  # 多个 Job 都失败时平分额度
+    parts = []
+    for job in failed_jobs:
+        text = await get_job_logs(repo.owner, repo.name, job["id"], max_chars=per_job)
+        parts.append(f"### Job: {job.get('name')}\n{text}")  # 标明这段日志来自哪个 Job
+    return "\n\n".join(parts)

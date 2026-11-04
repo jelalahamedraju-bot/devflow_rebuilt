@@ -24,7 +24,8 @@ class GitHubClient:
         return headers
 
     async def get(self, path: str, params: dict | None = None) -> Any:
-        async with httpx.AsyncClient(base_url=self.base_url, timeout=20) as client:
+        # follow_redirects：仓库改名/转移后 GitHub 回 301 指向新地址，要跟过去
+        async with httpx.AsyncClient(base_url=self.base_url, timeout=20, follow_redirects=True) as client:
             response = await client.get(path, headers=self._headers(), params=params)
             # 4xx/5xx 直接抛异常，不能把错误内容当成正常数据存进去
             response.raise_for_status()

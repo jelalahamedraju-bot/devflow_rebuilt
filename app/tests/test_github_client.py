@@ -4,6 +4,8 @@ GitHub 列表接口每页最多 100 条。PR #81 实际改了 117 个文件，
 只取第一页会悄悄丢掉 17 个——这就是这个测试要防住的 bug。
 """
 
+import httpx
+
 from app.services.github.client import GitHubClient
 
 
@@ -37,3 +39,28 @@ async def test_get_paginated_respects_limit(monkeypatch):
 
     assert len(items) == 5
     assert requested == [1]  # 只要 5 条，就不该把 500 条全拉下来
+
+
+async def test_get_follows_redirect_for_moved_repository(monkeypatch):
+    """仓库改名/转移后，GitHub 回 301 指向新地址；客户端要跟过去，而不是直接报错。
+
+    真实案例：tiangolo/sqlmodel 已转移，请求旧地址得到 301。
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/repos/old-owner/old-name":
+            return httpx.Response(301, headers={"Location": "https://api.github.com/repositories/42"})
+        if request.url.path == "/repositories/42":
+            return httpx.Response(200, json={"full_name": "new-owner/new-name"})
+        return httpx.Response(404)
+
+    real_async_client = httpx.AsyncClient
+
+    def client_with_fake_network(**kwargs):
+        return real_async_client(transport=httpx.MockTransport(handler), **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", client_with_fake_network)
+
+    data = await GitHubClient().get("/repos/old-owner/old-name")
+
+    assert data["full_name"] == "new-owner/new-name"

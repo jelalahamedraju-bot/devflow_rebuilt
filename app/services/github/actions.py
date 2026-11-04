@@ -16,6 +16,19 @@ async def list_workflow_run_jobs(owner: str, repo: str, run_id: int, token: str 
     return await client.get_paginated(f"/repos/{owner}/{repo}/actions/runs/{run_id}/jobs", item_key="jobs")
 
 
+async def get_job_logs(owner: str, repo: str, job_id: int, token: str | None = None, max_chars: int = 80_000) -> str:
+    """只下载某一个 Job 的日志（纯文本，不是 zip）。
+
+    太长时「砍掉开头、保留结尾」：报错和 exit code 基本都在日志最后面，
+    开头多是安装依赖之类的准备步骤。
+    """
+    client = GitHubClient(token)
+    text = (await client.get_bytes(f"/repos/{owner}/{repo}/actions/jobs/{job_id}/logs")).decode("utf-8", errors="replace")
+    if len(text) <= max_chars:
+        return text
+    return "…" + text[-(max_chars - 1):]  # 开头的省略号提醒：前面还有内容被截掉了
+
+
 async def get_workflow_run_logs(owner: str, repo: str, run_id: int, token: str | None = None, max_chars: int = 80_000) -> str:
     """下载某次运行的日志。GitHub 返回的是 zip 包（每个 Step 一个 txt），这里解压后拼成一段文本。
 

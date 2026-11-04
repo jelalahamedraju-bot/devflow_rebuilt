@@ -64,3 +64,9 @@ def no_real_github(monkeypatch):
         "list_workflow_run_jobs",
     ]:
         monkeypatch.setattr(f"app.services.repos_sync.{name}", empty, raising=False)
+
+    async def empty_text(*_args, **_kwargs):
+        return ""
+
+    for name in ["get_workflow_run_logs", "get_job_logs"]:
+        monkeypatch.setattr(f"app.services.repos_sync.{name}", empty_text, raising=False)
