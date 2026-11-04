@@ -1,0 +1,41 @@
+# 每次 push 或有人提 PR，GitHub 都会按这个文件自动跑测试
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  # ① 默认方式：内存 SQLite，最快，不依赖任何外部服务
+  sqlite:
+    runs-on: ubuntu-latest                 # 借 GitHub 一台临时 Linux 电脑
+    steps:
+      - uses: actions/checkout@v4          # 把代码下载到这台电脑
+      - uses: astral-sh/setup-uv@v6        # 装 uv（它会按 .python-version 准备 Python）
+      - run: uv sync                       # 按 uv.lock 装依赖，和本地一模一样
+      - run: uv run pytest -v              # 跑全部测试
+
+  # ② 再用真实 PostgreSQL 跑一遍：有些 bug 只有 PG 才会暴露（例如 GitHub ID 超过 32 位整数）
+  postgres:
+    runs-on: ubuntu-latest
+    services:
+      postgres:                            # GitHub 临时起一个 PostgreSQL 容器，测完自动销毁
+        image: pgvector/pgvector:pg16      # 和本地 docker-compose.yml 用同一个镜像
+        env:
+          POSTGRES_USER: devflow
+          POSTGRES_PASSWORD: devflow
+          POSTGRES_DB: devflow_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U devflow -d devflow_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      TEST_DATABASE_URL: postgresql+psycopg://devflow:devflow@127.0.0.1:5432/devflow_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync
+      - run: uv run pytest -v
