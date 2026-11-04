@@ -4,11 +4,12 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session, selectinload
 
-from app.db.models import Issue, PullRequest, Repository
+from app.db.models import Issue, PullRequest, Repository, WorkflowRun
 from app.db.session import get_db
 from app.schemas.repos import (
     IssueOut,
     PullRequestOut,
+    WorkflowRunOut,
     RepoConnectRequest,
     RepoConnectResponse,
     RepoSyncRequest,
@@ -42,6 +43,7 @@ async def connect_repo(payload: RepoConnectRequest, db: Session = Depends(get_db
         RepoSyncRequest(
             sync_issues=payload.sync_issues,
             sync_pull_requests=payload.sync_pull_requests,
+            sync_workflow_runs=payload.sync_workflow_runs,
             limit=payload.initial_sync_limit,
         ),
     )
@@ -81,6 +83,17 @@ def list_pull_requests(repo_id: uuid.UUID, db: Session = Depends(get_db)):
         .filter(PullRequest.repo_id == repo_id)
         .options(selectinload(PullRequest.files), selectinload(PullRequest.review_comments))
         .order_by(PullRequest.number.desc())
+        .all()
+    )
+
+
+@router.get("/{repo_id}/workflow-runs", response_model=list[WorkflowRunOut])
+def list_workflow_runs(repo_id: uuid.UUID, db: Session = Depends(get_db)):
+    """读取 CI 运行记录（含 Jobs、失败日志），按时间倒序。只查本地数据库。"""
+    return (
+        db.query(WorkflowRun)
+        .filter(WorkflowRun.repo_id == repo_id)
+        .order_by(WorkflowRun.created_at.desc())
         .all()
     )
 

@@ -1,5 +1,6 @@
 import uuid
 from datetime import datetime
+from typing import Any
 
 from sqlalchemy import JSON, BigInteger, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, Uuid
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -108,3 +109,24 @@ class PRReviewComment(Base):
     updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     pr: Mapped[PullRequest] = relationship(back_populates="review_comments")
+
+
+class WorkflowRun(Base):
+    """一次 GitHub Actions 运行（CI）。"""
+
+    __tablename__ = "workflow_runs"
+    __table_args__ = (UniqueConstraint("repo_id", "github_run_id"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    repo_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("repositories.id"), index=True)
+    github_run_id: Mapped[int] = mapped_column(BigInteger)
+    name: Mapped[str] = mapped_column(String(300))
+    status: Mapped[str] = mapped_column(String(80))  # queued / in_progress / completed
+    conclusion: Mapped[str | None] = mapped_column(String(80), nullable=True)  # success / failure / ...；没跑完时为空
+    html_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 每个 Job 及其 Steps 整理后存成 JSON（不单独建表，查询时整体读取即可）
+    jobs: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    # 只有失败的运行才有日志；第 07 章进 RAG 前还必须先脱敏、限长
+    logs_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

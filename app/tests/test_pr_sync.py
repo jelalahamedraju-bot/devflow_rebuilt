@@ -92,7 +92,7 @@ async def test_sync_saves_pr_with_files_and_review_comments(db, monkeypatch):
     result = await sync_repository(db, repo, RepoSyncRequest())
 
     pr = db.query(PullRequest).filter(PullRequest.repo_id == repo.id).one()
-    assert result.synced == {"issues": 0, "pull_requests": 1}
+    assert result.synced == {"issues": 0, "pull_requests": 1, "workflow_runs": 0}
     assert pr.number == 12
     assert pr.github_pr_id == 2900000001
     assert pr.author == "bob"

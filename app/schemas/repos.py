@@ -9,6 +9,7 @@ class RepoSyncRequest(BaseModel):
 
     sync_issues: bool = True
     sync_pull_requests: bool = True
+    sync_workflow_runs: bool = True
     limit: int = Field(default=30, ge=1, le=100)
 
 
@@ -26,6 +27,7 @@ class RepoConnectRequest(BaseModel):
     initial_sync_limit: int = Field(default=5, ge=1, le=50)
     sync_issues: bool = True
     sync_pull_requests: bool = True
+    sync_workflow_runs: bool = True
 
 
 class RepoConnectResponse(BaseModel):
@@ -80,3 +82,15 @@ class PullRequestOut(BaseModel):
     updated_at: datetime | None
     files: list[PRFileOut]
     review_comments: list[PRReviewCommentOut]
+
+
+class WorkflowRunOut(BaseModel):
+    model_config = {"from_attributes": True}
+
+    name: str
+    status: str
+    conclusion: str | None
+    html_url: str | None
+    jobs: list[dict]
+    logs_text: str | None
+    created_at: datetime | None

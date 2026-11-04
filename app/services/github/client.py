@@ -33,17 +33,37 @@ class GitHubClient:
     async def get_repo(self, owner: str, repo: str) -> dict[str, Any]:
         return await self.get(f"/repos/{owner}/{repo}")
 
-    async def get_paginated(self, path: str, params: dict | None = None, limit: int | None = None) -> list[dict]:
+    async def get_bytes(self, path: str) -> bytes:
+        """下载二进制内容（比如 CI 日志 zip）。
+
+        GitHub 会先回一个 302 跳转到临时下载地址，所以要 follow_redirects。
+        httpx 跳到别的域名时会自动去掉 Authorization 头，Token 不会泄露给下载服务器。
+        """
+        async with httpx.AsyncClient(base_url=self.base_url, timeout=60, follow_redirects=True) as client:
+            response = await client.get(path, headers=self._headers())
+            response.raise_for_status()
+            return response.content
+
+    async def get_paginated(
+        self,
+        path: str,
+        params: dict | None = None,
+        limit: int | None = None,
+        item_key: str | None = None,
+    ) -> list[dict]:
         """一页一页地拉，直到拉完或拉够 limit 条。
 
         GitHub 列表接口每页最多 100 条；只请求一次会悄悄丢掉后面的数据
         （例如某个 PR 改了 117 个文件，只拿第一页就只剩 100 个）。
+
+        item_key：有的接口不直接返回数组，而是 {"workflow_runs": [...]}，这时告诉我取哪个字段。
         """
         per_page = 100 if limit is None else min(limit, 100)
         items: list[dict] = []
         page = 1
         while True:
-            batch = await self.get(path, {**(params or {}), "per_page": per_page, "page": page})
+            data = await self.get(path, {**(params or {}), "per_page": per_page, "page": page})
+            batch = data.get(item_key, []) if item_key else data
             items.extend(batch)
             if limit is not None and len(items) >= limit:
                 return items[:limit]

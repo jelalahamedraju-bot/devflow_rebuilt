@@ -43,3 +43,24 @@ def make_repo(db, owner="openai", name="openai-quickstart-python"):
     db.add(repo)
     db.commit()
     return repo
+
+
+@pytest.fixture(autouse=True)
+def no_real_github(monkeypatch):
+    """所有测试自动生效：同步器里用到的 GitHub 请求函数默认都返回空列表。
+
+    这样任何测试都不会真的联网；每个测试只需要覆盖自己关心的那几个函数。
+    """
+
+    async def empty(*_args, **_kwargs):
+        return []
+
+    for name in [
+        "list_issues",
+        "list_pull_requests",
+        "list_pull_request_files",
+        "list_pull_request_review_comments",
+        "list_workflow_runs",
+        "list_workflow_run_jobs",
+    ]:
+        monkeypatch.setattr(f"app.services.repos_sync.{name}", empty, raising=False)

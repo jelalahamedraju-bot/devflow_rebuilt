@@ -10,8 +10,9 @@ from datetime import UTC, datetime
 
 from sqlalchemy.orm import Session
 
-from app.db.models import Issue, PRFile, PRReviewComment, PullRequest, Repository
+from app.db.models import Issue, PRFile, PRReviewComment, PullRequest, Repository, WorkflowRun
 from app.schemas.repos import RepoSyncRequest, RepoSyncResponse
+from app.services.github.actions import get_workflow_run_logs, list_workflow_run_jobs, list_workflow_runs
 from app.services.github.issues import list_issues
 from app.services.github.pull_requests import (
     list_pull_request_files,
@@ -39,6 +40,9 @@ async def sync_repository(db: Session, repo: Repository, payload: RepoSyncReques
 
     if payload.sync_pull_requests:
         synced["pull_requests"] = await _sync_pull_requests(db, repo, payload.limit)
+
+    if payload.sync_workflow_runs:
+        synced["workflow_runs"] = await _sync_workflow_runs(db, repo, payload.limit)
 
     repo.last_sync_at = datetime.now(UTC)
     # 唯一的提交点：前面任何一步报错，都不会写入半截数据
@@ -136,4 +140,61 @@ async def _sync_pull_requests(db: Session, repo: Repository, limit: int) -> int:
                     updated_at=parse_github_datetime(c.get("updated_at")),
                 )
             )
+    return len(items)
+
+
+def _summarize_job(job: dict) -> dict:
+    """只保留需要的字段，不把 GitHub 的整个响应原样存进去。"""
+    return {
+        "id": job.get("id"),
+        "name": job.get("name"),
+        "status": job.get("status"),
+        "conclusion": job.get("conclusion"),
+        "html_url": job.get("html_url"),
+        "started_at": job.get("started_at"),
+        "completed_at": job.get("completed_at"),
+        "steps": [
+            {
+                "number": step.get("number"),
+                "name": step.get("name"),
+                "status": step.get("status"),
+                "conclusion": step.get("conclusion"),
+            }
+            for step in job.get("steps", [])
+        ],
+    }
+
+
+async def _sync_workflow_runs(db: Session, repo: Repository, limit: int) -> int:
+    items = await list_workflow_runs(repo.owner, repo.name, limit=limit)
+    for item in items:
+        # ① Run 本体：同一套「repo_id + GitHub ID，有则更新、无则新增」
+        run = (
+            db.query(WorkflowRun)
+            .filter(WorkflowRun.repo_id == repo.id, WorkflowRun.github_run_id == item["id"])
+            .one_or_none()
+        )
+        if run is None:
+            run = WorkflowRun(repo_id=repo.id, github_run_id=item["id"])
+            db.add(run)
+
+        run.name = item.get("name") or "workflow"
+        run.status = item.get("status") or "unknown"
+        run.conclusion = item.get("conclusion")  # 进行中时为 None，跑完后才有值
+        run.html_url = item.get("html_url")
+        run.created_at = parse_github_datetime(item.get("created_at"))
+        run.updated_at = parse_github_datetime(item.get("updated_at"))
+
+        # ② Jobs + Steps：整理后整组覆盖
+        jobs = await list_workflow_run_jobs(repo.owner, repo.name, item["id"])
+        run.jobs = [_summarize_job(job) for job in jobs]
+
+        # ③ 只有失败的运行才下载日志：成功日志量大、重复多，排查价值低
+        if run.conclusion == "failure":
+            try:
+                run.logs_text = await get_workflow_run_logs(repo.owner, repo.name, item["id"])
+            except Exception:
+                # 日志是「锦上添花」：下载失败（没 Token、日志已过期被删）不能拖垮整次同步。
+                # 运行记录本身照样保存，只是没有日志。（和「同步不依赖 RAG」是同一个原则）
+                pass
     return len(items)

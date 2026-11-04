@@ -53,7 +53,7 @@ async def test_sync_saves_issue_to_database(db, monkeypatch):
 
     issue = db.query(Issue).filter(Issue.repo_id == repo.id).one()
     assert result.status == "completed"
-    assert result.synced == {"issues": 1, "pull_requests": 0}
+    assert result.synced == {"issues": 1, "pull_requests": 0, "workflow_runs": 0}
     assert issue.number == 78
     assert issue.github_issue_id == 6078323038
     assert issue.labels == ["bug"]
