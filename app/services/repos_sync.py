@@ -10,9 +10,14 @@ from datetime import UTC, datetime
 
 from sqlalchemy.orm import Session
 
-from app.db.models import Issue, Repository
+from app.db.models import Issue, PRFile, PRReviewComment, PullRequest, Repository
 from app.schemas.repos import RepoSyncRequest, RepoSyncResponse
 from app.services.github.issues import list_issues
+from app.services.github.pull_requests import (
+    list_pull_request_files,
+    list_pull_request_review_comments,
+    list_pull_requests,
+)
 
 
 def parse_github_datetime(value: str | None) -> datetime | None:
@@ -30,33 +35,105 @@ async def sync_repository(db: Session, repo: Repository, payload: RepoSyncReques
     synced: dict[str, int] = {}
 
     if payload.sync_issues:
-        items = await list_issues(repo.owner, repo.name, limit=payload.limit)
-        for item in items:
-            # 关键：先锁定仓库，再用 GitHub 原始 ID 找「是不是同一个 Issue」
-            issue = (
-                db.query(Issue)
-                .filter(Issue.repo_id == repo.id, Issue.github_issue_id == item["id"])
-                .one_or_none()
-            )
-            if issue is None:  # 没有才新增
-                issue = Issue(repo_id=repo.id, github_issue_id=item["id"])
-                db.add(issue)
+        synced["issues"] = await _sync_issues(db, repo, payload.limit)
 
-            # 有就覆盖字段（open -> closed 就是在这里更新的）
-            issue.number = item["number"]
-            issue.title = item.get("title") or ""
-            issue.body = item.get("body")
-            issue.state = item.get("state") or "open"
-            issue.labels = [label["name"] for label in item.get("labels", []) if label.get("name")]
-            issue.author = login_of(item.get("user"))
-            issue.assignees = [login_of(u) for u in item.get("assignees", []) if login_of(u)]
-            issue.created_at = parse_github_datetime(item.get("created_at"))
-            issue.updated_at = parse_github_datetime(item.get("updated_at"))
-            issue.closed_at = parse_github_datetime(item.get("closed_at"))
-        synced["issues"] = len(items)
+    if payload.sync_pull_requests:
+        synced["pull_requests"] = await _sync_pull_requests(db, repo, payload.limit)
 
     repo.last_sync_at = datetime.now(UTC)
     # 唯一的提交点：前面任何一步报错，都不会写入半截数据
     db.commit()
 
     return RepoSyncResponse(repo_id=repo.id, status="completed", synced=synced)
+
+
+async def _sync_issues(db: Session, repo: Repository, limit: int) -> int:
+    items = await list_issues(repo.owner, repo.name, limit=limit)
+    for item in items:
+        # 关键：先锁定仓库，再用 GitHub 原始 ID 找「是不是同一个 Issue」
+        issue = (
+            db.query(Issue)
+            .filter(Issue.repo_id == repo.id, Issue.github_issue_id == item["id"])
+            .one_or_none()
+        )
+        if issue is None:  # 没有才新增
+            issue = Issue(repo_id=repo.id, github_issue_id=item["id"])
+            db.add(issue)
+
+        # 有就覆盖字段（open -> closed 就是在这里更新的）
+        issue.number = item["number"]
+        issue.title = item.get("title") or ""
+        issue.body = item.get("body")
+        issue.state = item.get("state") or "open"
+        issue.labels = [label["name"] for label in item.get("labels", []) if label.get("name")]
+        issue.author = login_of(item.get("user"))
+        issue.assignees = [login_of(u) for u in item.get("assignees", []) if login_of(u)]
+        issue.created_at = parse_github_datetime(item.get("created_at"))
+        issue.updated_at = parse_github_datetime(item.get("updated_at"))
+        issue.closed_at = parse_github_datetime(item.get("closed_at"))
+    return len(items)
+
+
+async def _sync_pull_requests(db: Session, repo: Repository, limit: int) -> int:
+    items = await list_pull_requests(repo.owner, repo.name, limit=limit)
+    for item in items:
+        # ① PR 本体：和 Issue 完全同一套规则（repo_id + GitHub ID，有则更新、无则新增）
+        pr = (
+            db.query(PullRequest)
+            .filter(PullRequest.repo_id == repo.id, PullRequest.github_pr_id == item["id"])
+            .one_or_none()
+        )
+        if pr is None:
+            pr = PullRequest(repo_id=repo.id, github_pr_id=item["id"])
+            db.add(pr)
+
+        pr.number = item["number"]
+        pr.title = item.get("title") or ""
+        pr.body = item.get("body")
+        pr.state = item.get("state") or "open"
+        pr.author = login_of(item.get("user"))
+        pr.base_branch = (item.get("base") or {}).get("ref")
+        pr.head_branch = (item.get("head") or {}).get("ref")
+        pr.merged_at = parse_github_datetime(item.get("merged_at"))
+        pr.created_at = parse_github_datetime(item.get("created_at"))
+        pr.updated_at = parse_github_datetime(item.get("updated_at"))
+        # flush：把这个 PR 先发给数据库（还没提交），这样新 PR 的 pr.id 就有值了，
+        # 下面的文件和评论要用 pr.id 作为外键
+        db.flush()
+
+        # ② 子资源：每个 PR 要再请求 2 次 GitHub（所以 PR 多时同步会比较慢）
+        files = await list_pull_request_files(repo.owner, repo.name, pr.number)
+        comments = await list_pull_request_review_comments(repo.owner, repo.name, pr.number)
+
+        # ③ 整组替换：先删掉这个 PR 的旧文件/旧评论，再写入最新的。
+        #    文件没有 GitHub ID，没法「按 ID 找到再更新」；而且作者撤掉的文件也必须从本地消失。
+        #    代价：如果某次拉取失败返回了空列表，本地也会被清空（生产环境要更细的失败处理）。
+        db.query(PRFile).filter(PRFile.pr_id == pr.id).delete()
+        for f in files:
+            db.add(
+                PRFile(
+                    pr_id=pr.id,
+                    filename=f.get("filename") or "",
+                    status=f.get("status") or "modified",
+                    additions=f.get("additions") or 0,
+                    deletions=f.get("deletions") or 0,
+                    patch=f.get("patch"),  # 二进制/超大文件没有 patch，保留 None
+                )
+            )
+
+        db.query(PRReviewComment).filter(PRReviewComment.pr_id == pr.id).delete()
+        for c in comments:
+            db.add(
+                PRReviewComment(
+                    pr_id=pr.id,
+                    github_comment_id=c.get("id"),
+                    body=c.get("body"),
+                    path=c.get("path"),
+                    # 代码更新后评论对应的行可能已不存在，这时 line 为空，退回 original_line
+                    line=c.get("line") or c.get("original_line"),
+                    author=login_of(c.get("user")),
+                    created_at=parse_github_datetime(c.get("created_at")),
+                    updated_at=parse_github_datetime(c.get("updated_at")),
+                )
+            )
+    return len(items)

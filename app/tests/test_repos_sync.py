@@ -1,54 +1,13 @@
 """6.4 Issue 同步链路的测试。
 
 不联网：用 monkeypatch 把「去 GitHub 拉 Issue」换成返回固定数据的假函数；
-数据库默认用内存 SQLite，也可以通过 TEST_DATABASE_URL 切到 PostgreSQL。
+数据库由 conftest.py 里的 db fixture 提供（默认 SQLite，可切 PostgreSQL）。
 """
 
-import os
-
-import pytest
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
-
-from app.db.models import Base, Issue, Repository
+from app.db.models import Issue
 from app.schemas.repos import RepoSyncRequest
 from app.services.repos_sync import sync_repository
-
-
-@pytest.fixture
-def db():
-    """每个测试拿到一个干净的数据库会话，测完一定关闭。
-
-    默认用内存 SQLite（快、不依赖外部服务）。
-    设置环境变量 TEST_DATABASE_URL 后改用真实 PostgreSQL，例如：
-    TEST_DATABASE_URL=postgresql+psycopg://devflow:devflow@127.0.0.1:5433/devflow_test
-    SQLite 对类型很宽松（整数永远是 64 位），有些 bug 只有在 PostgreSQL 上才会暴露。
-    """
-    url = os.environ.get("TEST_DATABASE_URL")
-    if url:
-        engine = create_engine(url)
-        Base.metadata.drop_all(engine)  # 每个测试从空库开始
-    else:
-        engine = create_engine(
-            "sqlite+pysqlite:///:memory:",
-            connect_args={"check_same_thread": False},
-            poolclass=StaticPool,
-        )
-    Base.metadata.create_all(engine)
-    session = sessionmaker(bind=engine)()
-    yield session
-    # 收尾：不关闭的话，PostgreSQL 上会留下「idle in transaction」的连接，
-    # 它持有表锁，下一个测试的 DROP TABLE 会一直等下去（卡死）。
-    session.close()
-    engine.dispose()
-
-
-def make_repo(db, owner="openai", name="openai-quickstart-python"):
-    repo = Repository(owner=owner, name=name, full_name=f"{owner}/{name}")
-    db.add(repo)
-    db.commit()
-    return repo
+from app.tests.conftest import make_repo
 
 
 def github_issue(gid=6078323038, number=78, state="open", title="Error: Could not import 'app'."):
@@ -77,7 +36,12 @@ def fake_github(monkeypatch, items_by_repo):
     async def fake_list_issues(owner, repo, **_kwargs):
         return items_by_repo[f"{owner}/{repo}"]
 
+    async def no_pull_requests(*_args, **_kwargs):
+        return []
+
     monkeypatch.setattr("app.services.repos_sync.list_issues", fake_list_issues)
+    # 这组测试只关心 Issue，PR 一律返回空列表，避免真的去请求 GitHub
+    monkeypatch.setattr("app.services.repos_sync.list_pull_requests", no_pull_requests)
 
 
 # 1. 基本功能：GitHub 的 Issue 能存进数据库，字段转换正确
@@ -89,7 +53,7 @@ async def test_sync_saves_issue_to_database(db, monkeypatch):
 
     issue = db.query(Issue).filter(Issue.repo_id == repo.id).one()
     assert result.status == "completed"
-    assert result.synced == {"issues": 1}
+    assert result.synced == {"issues": 1, "pull_requests": 0}
     assert issue.number == 78
     assert issue.github_issue_id == 6078323038
     assert issue.labels == ["bug"]

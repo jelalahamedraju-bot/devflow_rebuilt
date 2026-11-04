@@ -2,12 +2,13 @@ import uuid
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
-from app.db.models import Issue, Repository
+from app.db.models import Issue, PullRequest, Repository
 from app.db.session import get_db
 from app.schemas.repos import (
     IssueOut,
+    PullRequestOut,
     RepoConnectRequest,
     RepoConnectResponse,
     RepoSyncRequest,
@@ -35,7 +36,15 @@ async def connect_repo(payload: RepoConnectRequest, db: Session = Depends(get_db
     # 先提交，拿到 repo.id；Issue 要用它当外键
     db.commit()
 
-    result = await sync_repository(db, repo, RepoSyncRequest(limit=payload.initial_sync_limit))
+    result = await sync_repository(
+        db,
+        repo,
+        RepoSyncRequest(
+            sync_issues=payload.sync_issues,
+            sync_pull_requests=payload.sync_pull_requests,
+            limit=payload.initial_sync_limit,
+        ),
+    )
     return RepoConnectResponse(
         repo_id=repo.id,
         full_name=repo.full_name,
@@ -58,6 +67,22 @@ async def sync_repo(repo_id: uuid.UUID, payload: RepoSyncRequest, db: Session = 
 def list_issues(repo_id: uuid.UUID, db: Session = Depends(get_db)):
     """读取：只查本地数据库，不请求 GitHub。GitHub 挂了也能看已同步的数据。"""
     return db.query(Issue).filter(Issue.repo_id == repo_id).order_by(Issue.number.desc()).all()
+
+
+@router.get("/{repo_id}/pull-requests", response_model=list[PullRequestOut])
+def list_pull_requests(repo_id: uuid.UUID, db: Session = Depends(get_db)):
+    """读取 PR + 改动文件 + 行级评论。同样只查本地数据库。
+
+    selectinload：用一条额外查询把所有 PR 的文件和评论一次性取出来，
+    而不是每个 PR 单独查一次（避免「N+1 查询」问题）。
+    """
+    return (
+        db.query(PullRequest)
+        .filter(PullRequest.repo_id == repo_id)
+        .options(selectinload(PullRequest.files), selectinload(PullRequest.review_comments))
+        .order_by(PullRequest.number.desc())
+        .all()
+    )
 
 
 @router.get("/{repo_id}/sync-status")

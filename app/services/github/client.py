@@ -32,3 +32,21 @@ class GitHubClient:
 
     async def get_repo(self, owner: str, repo: str) -> dict[str, Any]:
         return await self.get(f"/repos/{owner}/{repo}")
+
+    async def get_paginated(self, path: str, params: dict | None = None, limit: int | None = None) -> list[dict]:
+        """一页一页地拉，直到拉完或拉够 limit 条。
+
+        GitHub 列表接口每页最多 100 条；只请求一次会悄悄丢掉后面的数据
+        （例如某个 PR 改了 117 个文件，只拿第一页就只剩 100 个）。
+        """
+        per_page = 100 if limit is None else min(limit, 100)
+        items: list[dict] = []
+        page = 1
+        while True:
+            batch = await self.get(path, {**(params or {}), "per_page": per_page, "page": page})
+            items.extend(batch)
+            if limit is not None and len(items) >= limit:
+                return items[:limit]
+            if len(batch) < per_page:  # 这一页没装满，说明已经是最后一页
+                return items
+            page += 1
