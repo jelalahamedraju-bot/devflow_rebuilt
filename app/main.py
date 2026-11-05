@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from app.api.routes import repos, webhooks
+from app.api.routes import project_index, repos, webhooks
 from app.core.config import settings
 from app.db.models import Base  # 导入 models，让所有表登记到 Base.metadata
 from app.db.session import engine
@@ -29,3 +29,4 @@ async def lifespan(_app: FastAPI):
 app = FastAPI(title="DevFlow Rebuild", lifespan=lifespan)
 app.include_router(repos.router, prefix="/api")
 app.include_router(webhooks.router, prefix="/api/webhooks")
+app.include_router(project_index.router, prefix="/api")

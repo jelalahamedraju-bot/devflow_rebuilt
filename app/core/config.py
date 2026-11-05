@@ -14,6 +14,9 @@ class Settings(BaseSettings):
     github_token: str | None = None
     github_api_base_url: str = "https://api.github.com"
 
+    # managed 模式下，系统把仓库代码下载到这里（每个仓库一个子文件夹）
+    repo_checkout_dir: str = ".data/repos"
+
     # Webhook 共享密钥：GitHub 用它给每个通知签名，我们用它验证「真的是 GitHub 发来的」
     # 没配时跳过校验——只适合本地开发，部署时必须配置
     github_webhook_secret: str | None = None

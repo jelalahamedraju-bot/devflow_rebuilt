@@ -70,3 +70,11 @@ def no_real_github(monkeypatch):
 
     for name in ["get_workflow_run_logs", "get_job_logs"]:
         monkeypatch.setattr(f"app.services.repos_sync.{name}", empty_text, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def clean_git_environment(monkeypatch):
+    """某些 Windows 终端（MSYS）设置了这两个变量，会把 git 的 file:/// 地址弄坏。
+    它们和项目代码无关，只影响测试里用本地临时仓库模拟远程仓库，所以测试时去掉。"""
+    monkeypatch.delenv("MSYS_NO_PATHCONV", raising=False)
+    monkeypatch.delenv("MSYS2_ARG_CONV_EXCL", raising=False)

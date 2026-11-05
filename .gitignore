@@ -12,3 +12,6 @@ wheels/
 # 本地数据库与密钥
 devflow.db
 .env
+
+# 系统下载的仓库代码（6.5 managed checkout）
+.data/

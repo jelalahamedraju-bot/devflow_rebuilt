@@ -21,8 +21,17 @@ class RepoSyncResponse(BaseModel):
 
 
 class RepoConnectRequest(BaseModel):
-    owner: str
-    repo: str
+    """两种填法二选一：
+    - local_path：本地已有的仓库文件夹（local 模式，系统只读，自动认出 owner/repo）
+    - owner + repo：系统自己下载（managed 模式），可用 clone_parent_dir 指定下载到哪个文件夹
+    """
+
+    owner: str | None = None
+    repo: str | None = None
+    local_path: str | None = None
+    clone_parent_dir: str | None = None
+    provider: str | None = None  # github / github_compatible；不填会根据地址自动判断
+    api_base_url: str | None = None  # github_compatible 时，公司自建服务的 API 地址
     # 首次连接只取少量数据，避免一上来扫大仓库
     initial_sync_limit: int = Field(default=5, ge=1, le=50)
     sync_issues: bool = True

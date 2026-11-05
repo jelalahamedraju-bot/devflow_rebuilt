@@ -1,8 +1,8 @@
 from app.services.github.client import GitHubClient
 
 
-async def list_issues(owner: str, repo: str, token: str | None = None, limit: int = 30) -> list[dict]:
-    client = GitHubClient(token)
+async def list_issues(owner: str, repo: str, token: str | None = None, base_url: str | None = None, limit: int = 30) -> list[dict]:
+    client = GitHubClient(token, base_url)
     # state=all：打开和关闭的都要，这样本地才能看到 open -> closed 的变化
     # 注意：这里只取第一页，没有做分页
     items = await client.get(f"/repos/{owner}/{repo}/issues", {"state": "all", "per_page": limit})

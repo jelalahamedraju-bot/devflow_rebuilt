@@ -71,7 +71,7 @@ async def sync_repository_by_id(repo_id: UUID, payload: RepoSyncRequest) -> Repo
 
 
 async def _sync_issues(db: Session, repo: Repository, limit: int) -> int:
-    items = await list_issues(repo.owner, repo.name, limit=limit)
+    items = await list_issues(repo.owner, repo.name, limit=limit, base_url=repo.api_base_url)
     for item in items:
         # 关键：先锁定仓库，再用 GitHub 原始 ID 找「是不是同一个 Issue」
         issue = (
@@ -98,7 +98,7 @@ async def _sync_issues(db: Session, repo: Repository, limit: int) -> int:
 
 
 async def _sync_pull_requests(db: Session, repo: Repository, limit: int) -> int:
-    items = await list_pull_requests(repo.owner, repo.name, limit=limit)
+    items = await list_pull_requests(repo.owner, repo.name, limit=limit, base_url=repo.api_base_url)
     for item in items:
         # ① PR 本体：和 Issue 完全同一套规则（repo_id + GitHub ID，有则更新、无则新增）
         pr = (
@@ -125,8 +125,8 @@ async def _sync_pull_requests(db: Session, repo: Repository, limit: int) -> int:
         db.flush()
 
         # ② 子资源：每个 PR 要再请求 2 次 GitHub（所以 PR 多时同步会比较慢）
-        files = await list_pull_request_files(repo.owner, repo.name, pr.number)
-        comments = await list_pull_request_review_comments(repo.owner, repo.name, pr.number)
+        files = await list_pull_request_files(repo.owner, repo.name, pr.number, base_url=repo.api_base_url)
+        comments = await list_pull_request_review_comments(repo.owner, repo.name, pr.number, base_url=repo.api_base_url)
 
         # ③ 整组替换：先删掉这个 PR 的旧文件/旧评论，再写入最新的。
         #    文件没有 GitHub ID，没法「按 ID 找到再更新」；而且作者撤掉的文件也必须从本地消失。
@@ -185,7 +185,7 @@ def _summarize_job(job: dict) -> dict:
 
 
 async def _sync_workflow_runs(db: Session, repo: Repository, limit: int) -> int:
-    items = await list_workflow_runs(repo.owner, repo.name, limit=limit)
+    items = await list_workflow_runs(repo.owner, repo.name, limit=limit, base_url=repo.api_base_url)
     for item in items:
         # ① Run 本体：同一套「repo_id + GitHub ID，有则更新、无则新增」
         run = (
@@ -205,7 +205,7 @@ async def _sync_workflow_runs(db: Session, repo: Repository, limit: int) -> int:
         run.updated_at = parse_github_datetime(item.get("updated_at"))
 
         # ② Jobs + Steps：整理后整组覆盖
-        jobs = await list_workflow_run_jobs(repo.owner, repo.name, item["id"])
+        jobs = await list_workflow_run_jobs(repo.owner, repo.name, item["id"], base_url=repo.api_base_url)
         run.jobs = [_summarize_job(job) for job in jobs]
 
         # ③ 只有失败的运行才下载日志：成功日志量大、重复多，排查价值低
@@ -231,11 +231,11 @@ async def _download_failure_logs(repo: Repository, run_id: int, jobs: list[dict]
     failed_jobs = [job for job in jobs if job.get("conclusion") == "failure"]
     if not failed_jobs:
         # 找不到失败的 Job（例如还没开始就挂了），退回下载整次运行的日志包
-        return await get_workflow_run_logs(repo.owner, repo.name, run_id, max_chars=LOG_BUDGET)
+        return await get_workflow_run_logs(repo.owner, repo.name, run_id, max_chars=LOG_BUDGET, base_url=repo.api_base_url)
 
     per_job = LOG_BUDGET // len(failed_jobs)  # 多个 Job 都失败时平分额度
     parts = []
     for job in failed_jobs:
-        text = await get_job_logs(repo.owner, repo.name, job["id"], max_chars=per_job)
+        text = await get_job_logs(repo.owner, repo.name, job["id"], max_chars=per_job, base_url=repo.api_base_url)
         parts.append(f"### Job: {job.get('name')}\n{text}")  # 标明这段日志来自哪个 Job
     return "\n\n".join(parts)

@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import JSON, BigInteger, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, Uuid
+from sqlalchemy import JSON, BigInteger, func, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, Uuid
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.session import Base
@@ -17,6 +17,13 @@ class Repository(Base):
     owner: Mapped[str] = mapped_column(String(200))
     name: Mapped[str] = mapped_column(String(200))
     full_name: Mapped[str] = mapped_column(String(400), unique=True)  # 例如 openai/openai-quickstart-python
+    # ---- 6.5：代码从哪来、放在哪、归谁管 ----
+    provider: Mapped[str] = mapped_column(String(80), default="github")  # github / github_compatible
+    api_base_url: Mapped[str | None] = mapped_column(Text, nullable=True)  # 去哪个地址调 API
+    clone_url: Mapped[str | None] = mapped_column(Text, nullable=True)  # 从哪个地址下载代码
+    local_path: Mapped[str | None] = mapped_column(Text, nullable=True)  # 代码在本地哪个文件夹
+    checkout_mode: Mapped[str] = mapped_column(String(20), default="managed")  # managed 系统管 / local 用户的，只读
+    default_branch: Mapped[str | None] = mapped_column(String(200), nullable=True)
     last_sync_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
@@ -130,3 +137,40 @@ class WorkflowRun(Base):
     logs_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class Document(Base):
+    """可以被引用的一份资料（项目说明、文档、依赖清单……）。
+
+    第 07 章会把其中适合 RAG 的切片、生成向量；6.5 只负责登记，不生成向量。
+    """
+
+    __tablename__ = "documents"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    repo_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("repositories.id"), index=True)
+    source_type: Mapped[str] = mapped_column(String(80), index=True)  # project_overview / project_doc / project_manifest
+    title: Mapped[str] = mapped_column(String(500))
+    content: Mapped[str] = mapped_column(Text)
+    meta: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, default=dict)  # 路径、证据层级、指纹……
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class ProjectIndexState(Base):
+    """项目预扫描的状态。每个仓库一行。
+
+    存的状态：missing / building / ready / failed。
+    stale（过期）不存：查询时用「当前指纹 ≠ 上次指纹」现算出来。
+    """
+
+    __tablename__ = "project_index_states"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    repo_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("repositories.id"), unique=True, index=True)
+    status: Mapped[str] = mapped_column(String(40), default="missing")
+    fingerprint: Mapped[str] = mapped_column(String(200), default="")
+    last_scan_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    snoozed_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    docs_indexed: Mapped[int] = mapped_column(Integer, default=0)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    summary_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
