@@ -8,9 +8,12 @@
 
 from datetime import UTC, datetime
 
+from uuid import UUID
+
 from sqlalchemy.orm import Session
 
 from app.db.models import Issue, PRFile, PRReviewComment, PullRequest, Repository, WorkflowRun
+from app.db.session import SessionLocal
 from app.schemas.repos import RepoSyncRequest, RepoSyncResponse
 from app.services.github.actions import get_job_logs, get_workflow_run_logs, list_workflow_run_jobs, list_workflow_runs
 from app.services.github.issues import list_issues
@@ -49,6 +52,22 @@ async def sync_repository(db: Session, repo: Repository, payload: RepoSyncReques
     db.commit()
 
     return RepoSyncResponse(repo_id=repo.id, status="completed", synced=synced)
+
+
+async def sync_repository_by_id(repo_id: UUID, payload: RepoSyncRequest) -> RepoSyncResponse | None:
+    """给后台任务用的入口（定时任务、Webhook）。
+
+    它们不在某个 HTTP 请求里，没有现成的 Session 可用（请求的 Session 在请求结束时就关了），
+    所以这里自己开一个、用完一定关掉。真正的同步规则仍然全在 sync_repository 里。
+    """
+    db = SessionLocal()
+    try:
+        repo = db.get(Repository, repo_id)
+        if repo is None:  # 仓库可能已经被删了：返回 None，不让后台任务崩掉
+            return None
+        return await sync_repository(db, repo, payload)
+    finally:
+        db.close()
 
 
 async def _sync_issues(db: Session, repo: Repository, limit: int) -> int:
